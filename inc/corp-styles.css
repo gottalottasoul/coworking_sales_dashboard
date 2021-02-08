@@ -1,0 +1,72 @@
+body {
+  font-family: Arial, sans-serif;
+  padding-top: 75px;
+}
+
+.section.sidebar {
+  top: 66px;
+  background-color: rgba(255, 255, 255, 0.9);
+}
+
+.value-box {
+  color: inherit;
+}
+
+.bg-primary {
+  background-color: rgba(69, 130, 236, 0.4);
+}
+
+.nav-tabs-custom > .nav-tabs > li.active {
+  border-top-color: rgba(69, 130, 236, 0.7);
+}
+
+
+h1 {
+  font-family: "Times New Roman", serif;
+  color: rgb(0, 38, 54);
+  font-size: 150%;
+  font-weight: bold;
+}
+
+.title {
+  margin-right: 200px;
+}
+
+h2 {
+  color: rgb(223, 184, 104);
+  font-size: 125%;
+  font-weight: bold;
+}
+
+h3 {
+  font-size: 110%;
+  font-weight: bold;
+  font-style: italic;
+}
+
+h4 {
+  font-size: 100%;
+}
+
+.watermark {
+  opacity: 0.2;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  font-size: 500%;
+  color: #00407d;
+}
+
+.main-container {
+    max-width: 1600px !important;
+}
+
+.section.sidebar { 
+  font-size: 75%; 
+  
+}
+
+.rpivotTable{ 
+  overflow-x: scroll;
+  overflow-y: scroll;
+}

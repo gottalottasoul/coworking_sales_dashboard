@@ -1,0 +1,623 @@
+---
+title: "Local Fill Dashboard"
+resource_files:
+- inc/hana_logo_small.png
+- Landlord_Report.Rmd
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    theme: readable
+    logo: inc/hana_logo_small.png
+    css: inc/corp-styles.css
+    self_contained: yes
+    vertical_layout: fill
+    horizontal_layout: fill
+    includes:
+      before_body: "inc/google-analytics.js"
+
+---
+
+
+```{r setup, include=FALSE}
+library(flexdashboard) 
+library(flextable)
+library(dplyr)
+library(tidyr)
+library(rpivotTable)
+library(DT)
+library(ggplot2)
+library(plotly)
+library(summarywidget)
+library(RiHana)
+
+
+
+#########Get Report Data############################
+#All data reading and transformations are done in Weekly_Reports_data_gen.R script.
+#Here we just load the tables we need.
+
+load("inc/local_fill_dashboard.RData")
+
+
+closed_30_days<-pipeline_deals %>% filter(close_date>=RiHana::get_relevant_date()$past_30_days,pipeline_stage=='Closed Won') %>% summarise(deals=n())
+deals_30_days<-pipeline_deals %>% filter(create_date>=RiHana::get_relevant_date()$past_30_days) %>% summarise(deals=n())
+top_unit_30_days<-pipeline_deals %>% filter(create_date>=RiHana::get_relevant_date()$past_30_days) %>% group_by(hana_unit) %>%  summarise(deals=n()) %>% arrange(desc(deals)) %>% slice(1)
+
+pipeline_detail_data<-reactive({
+  deals_data<-pipeline_deals %>%
+    #move this to extract so it will apply everywhere - not sure why this changed?
+#    mutate(close_date=lubridate::as_date(close_date)) %>% 
+    mutate(close_date=ifelse(grepl('closed',pipeline_stage,ignore.case = TRUE),close_date,NA),
+           close_date=lubridate::as_date(close_date)) %>% 
+    filter(between(close_date,input$detail_date[1],input$detail_date[2]) | is.na(close_date),
+           grepl(paste0(input$detail_pipeline,collapse = "|"),pipeline_stage),
+           grepl(paste0(input$detail_region,collapse = "|"),hana_region),
+           grepl(paste0(input$detail_location,collapse="|"),hana_unit),
+           grepl(paste0(input$detail_sales,collapse="|"),sales_channel),
+           grepl(paste0(input$detail_acquisition,collapse="|"),acquisition_channel),           
+           grepl(paste0(input$detail_product,collapse="|"),hana_product)) %>% 
+    mutate(monthly_amount=scales::dollar(monthly_amount)) %>% 
+        select(-hana_region,-hana_city,-create_week,-create_month,-create_quarter,-acquisition_channel,-acquisition_source,-digital_channel,-sales_channel,-closed_lost_reason,-total_deal_amount,-close_week,-close_month,-close_quarter,-cohort_week,-cohort_month,-cohort_quarter) %>% 
+    arrange(desc(pipeline_stage))
+  
+shiny::validate(
+    shiny::need(nrow(deals_data)>0, 
+         "No opportunities fit your selected criteria")
+  )
+
+  
+  return(deals_data)
+}
+)
+
+trend_data<-reactive({
+   trend_data<-pipeline_deals %>% 
+     filter(create_date>=input$trend_date[1],
+            create_date<=input$trend_date[2],
+            grepl(paste0(input$trend_region,collapse = "|"),hana_region),
+            grepl(paste0(input$trend_location,collapse="|"),hana_unit),
+            grepl(paste0(input$trend_product,collapse="|"),hana_product),
+            grepl(paste0(input$trend_acquisition,collapse="|"),acquisition_channel,ignore.case = TRUE)) %>% 
+     mutate(timespan=case_when(
+           input$TrendTimeDimension=='Week'~create_week,
+           input$TrendTimeDimension=='Month'~create_month,
+           input$TrendTimeDimension=='Quarter'~create_quarter)) %>% 
+    group_by(timespan,hana_product) %>% 
+     summarise(opptys=n())
+
+   
+  return(trend_data)
+}
+)
+
+close_data<-reactive({
+  close_data<-pipeline_deals %>% 
+     filter(pipeline_stage=='Closed Won',
+            close_date>=input$trend_date[1],
+            close_date<=input$trend_date[2],
+            grepl(paste0(input$trend_region,collapse = "|"),hana_region),
+            grepl(paste0(input$trend_location,collapse="|"),hana_unit),
+            grepl(paste0(input$trend_product,collapse="|"),hana_product),
+            grepl(paste0(input$trend_acquisition,collapse="|"),acquisition_channel,ignore.case = TRUE)) %>% 
+    mutate(timespan=case_when(
+    input$TrendTimeDimension=='Week'~lubridate::floor_date(close_date,unit="week",week_start=1),
+    input$TrendTimeDimension=='Month'~lubridate::floor_date(close_date,unit="month"),
+    input$TrendTimeDimension=='Quarter'~lubridate::floor_date(close_date,unit="quarter"))) %>% 
+    group_by(timespan,hana_product) %>% 
+    summarise(opptys=n())
+    
+  
+  return(close_data)
+    
+  
+})
+
+funnel_data<-reactive({
+   funnel_data<-pipeline_deals %>% 
+     filter(create_date>=input$trend_date[1],
+            create_date<=input$trend_date[2],
+            grepl(paste0(input$trend_region,collapse = "|"),hana_region),
+            grepl(paste0(input$trend_location,collapse="|"),hana_unit),
+            grepl(paste0(input$trend_product,collapse="|"),hana_product),
+            grepl(paste0(input$trend_acquisition,collapse="|"),acquisition_channel,ignore.case = TRUE),
+           !grepl('closed',pipeline_stage,ignore.case = TRUE)) %>% 
+#            pipeline_stage %in% c("Pre-funnel","Working to Contact","Deal Qualifying","Touring","Negotiation/Proposal","Contract Sent")) %>% 
+#     mutate(pipeline_stage=factor(pipeline_stage,levels=c("Upper Funnel","Qualified - Local Fill Opportunity","Touring", "Negotiation/Proposal","Contract Sent", "Closed Lost", "Closed Won")))  %>%    
+     mutate(pipeline_stage=factor(pipeline_stage,levels=c("Exploratory","Qualified","Touring / Solutioning","Negotiation","Proposal","Verbal Award / Contract Sent")))  %>%    
+      arrange(pipeline_stage) %>% 
+     group_by(pipeline_stage) %>% 
+     summarise(opptys=n())
+
+  return(funnel_data)
+}
+)
+
+
+conversion_data<-reactive({
+  conversion_data<-historical_deal_stage %>% 
+    filter(create_date>=input$trend_date[1],
+           create_date<=input$trend_date[2],
+            grepl(paste0(input$trend_region,collapse = "|"),hana_region),
+            grepl(paste0(input$trend_location,collapse="|"),hana_unit),
+            grepl(paste0(input$trend_product,collapse="|"),hana_product),
+            grepl(paste0(input$trend_acquisition,collapse="|"),acquisition_channel,ignore.case = TRUE)) %>% 
+    select(deal_id,Pipeline_resolution,pipeline_stage) %>%
+    filter(Pipeline_resolution %in% c('Closed Lost','Closed Won')) %>%
+    unique(.) %>%
+    group_by(pipeline_stage,Pipeline_resolution) %>%
+    summarise(deals=n()) %>%
+    pivot_wider(names_from=c(Pipeline_resolution),
+              values_from = c(deals),
+              values_fill = list(deals=0)) %>%
+    janitor::clean_names(.)  %>%
+    ungroup(.) %>%
+    mutate(conversion=closed_won/(closed_won+closed_lost),
+         pipeline_stage=factor(pipeline_stage,levels=c("Interest Expressed","Potential Opportunity","Initial Terms Sent", "Working to Contact","Deal Qualifying","Touring","Negotiation/Proposal","Contract Sent","Closed Lost","Closed Won","Cold/Dead"))) %>%
+#     pipeline_stage=factor(pipeline_stage,levels=c("Exploratory","Qualified","Touring / Solutioning","Negotiation","Proposal","Verbal Award / Contract Sent")))  %>%    
+  arrange(pipeline_stage)
+
+  
+  return(conversion_data)
+  
+})
+  
+
+time_in_stage_data<-reactive({
+  
+  time_in_stage_data<-historical_deal_stage %>% 
+    filter(create_date>=input$trend_date[1],
+           create_date<=input$trend_date[2],
+            grepl(paste0(input$trend_region,collapse = "|"),hana_region),
+            grepl(paste0(input$trend_location,collapse="|"),hana_unit),
+            grepl(paste0(input$trend_product,collapse="|"),hana_product),
+            grepl(paste0(input$trend_acquisition,collapse="|"),acquisition_channel,ignore.case = TRUE),
+           grepl(input$trend_resolution,Pipeline_resolution,ignore.case = TRUE),
+           !grepl('closed',pipeline_stage,ignore.case=TRUE))
+
+  return(time_in_stage_data)
+  
+})
+```
+
+
+Summary
+===================================== 
+
+Column {data-width=70%} 
+-------------------------------------
+
+### Summary
+
+```{r}
+
+big_border = officer::fp_border(color="black", width = 2)
+border_v = officer::fp_border(color="gray")
+border_h = officer::fp_border(color="gray")
+
+#myft <- flextable(pipeline_summary %>% arrange(hana_unit,measure))
+myft <- flextable(pipeline_summary)
+myft <- align(myft, align = "top", part = "all")
+myft <- border_inner_h(myft, part="all", border = border_h )
+myft <- border_inner_v(myft, part="all", border = border_v )
+myft <- merge_v(myft,j="hana_unit")
+myft <- autofit(myft)
+myft <- fix_border_issues(myft)
+myft
+```
+
+
+
+
+Column {data-width=25%} 
+-------------------------------------
+
+###### **Data Updated:** _`r file.info('inc/local_fill_dashboard.RData')$mtime` ._
+
+
+Over the past 30 days, **`r deals_30_days$deals`** deals have been created. <br>
+
+For deals created over that time,**`r closed_30_days$deals`** have been won, for a close rate of **`r scales::percent(closed_30_days$deals/deals_30_days$deals)` **. <br>
+
+**`r top_unit_30_days$hana_unit`** has the most deals created in the past month, with **`r top_unit_30_days$deals`**.
+
+
+Fill Pivot
+===================================== 
+
+### Fill Overview
+
+```{r}
+
+
+renderRpivotTable({
+
+  pivot_data<-pipeline_deals %>% 
+    select(deal_name,customer_name,hana_region,hana_unit,hana_city,hana_product,pipeline_stage,create_date,create_month,seats,lease_term,
+         monthly_amount,total_deal_amount,close_date,close_month,cohort_month,acquisition_channel,acquisition_source,digital_channel,
+         sales_channel,pipeline_stage_detail,last_pipeline_stage) %>%                  
+  replace_na(list(monthly_amount=0,digital_channel="N/A",last_pipeline_stage="N/A")) %>%
+  drop_na() 
+
+  rpivotTable(data=pivot_data, cols = "pipeline_stage",rows=c("hana_unit","hana_product"),sorters = "function(attr) {
+    var sortAs = $.pivotUtilities.sortAs;
+    if (attr == \"pipeline_stage\")
+        { return sortAs([\"Exploratory\", \"Qualified\", \"Touring / Solutioning\", \"Negotiation\",\"Proposal\", \"Verbal Award \ Contract Sent\", \"Closed Won\", \"Closed Lost\"]);  }
+    }")
+
+  })
+
+```
+
+
+Fill Trends {data-orientation=rows}
+===================================== 
+
+Inputs {.sidebar}
+-----------------------------------------------------------------------
+
+```{r}
+
+dateRangeInput('trend_date',
+      label = 'Choose the time range',
+      min=RiHana::get_relevant_date()$yoy_date,
+      max=RiHana::get_relevant_date()$yesterdays_date,
+      start = RiHana::get_relevant_date()$yoy_date, 
+      end = RiHana::get_relevant_date()$yesterdays_date,
+      weekstart = 1
+    )
+
+radioButtons("TrendTimeDimension",label="Pick the time interval",
+             choices=c("Week",
+                       "Month",
+                       "Quarter"),
+             selected="Month"
+            )
+helpText("Note: Time interval specifies the X axis where appicable for trending data")
+
+
+
+selectizeInput(
+        'trend_region', 'Choose a Region', choices = unique(na.omit(pipeline_deals$hana_region)),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+)
+
+
+selectizeInput(
+        'trend_location', 'Choose a Location', choices = unique(na.omit(pipeline_deals$hana_unit)),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+)
+
+selectInput(
+"trend_product",
+label = "Product",
+choices=c("All"="*",
+          "Team"="Team",
+          "Share"="Share",
+          "Meet"="Meet"),
+selected="All",
+multiple = TRUE
+)
+
+
+selectInput(
+"trend_acquisition",
+label = "Acquisition Channel",
+choices=c("All"="*",
+          "Marketing"="Marketing",
+          "Broker"="Broker",
+          "Local Sales"="Local",
+          "Enterprise"="Enterprise"),
+selected="All",
+multiple = TRUE
+)
+
+selectInput(
+"trend_resolution",
+label = "Final Deal State",
+choices=c("All"="*",
+          "Won"="won",
+          "Lost"="lost",
+          "In progress"="in progress"),
+selected="All",
+multiple = FALSE
+)
+
+helpText("Note: Final Deal State can be used to filter deals in the Time in Stage box plot.")
+
+
+```
+
+Row {data-height=400}
+-------------------------------------
+
+### Opportunities Created Over Time
+
+```{r}
+
+ renderPlotly({
+   opptys_data<-trend_data()
+  plot_ly(opptys_data,
+          color=~hana_product,
+          colors=hana_color_palette(n_distinct(opptys_data$hana_product),2),
+          x = ~timespan,
+          y = ~opptys,
+          type="bar")%>%
+    layout(barmode = "stack",
+           bargap=0.1,
+           legend = list(orientation = 'h'))
+}
+)
+```
+
+### Opportunities Won Over Time
+
+```{r}
+
+ renderPlotly({
+   won_opptys_data<-close_data()
+  plot_ly(won_opptys_data,
+          color=~hana_product,
+          colors=hana_color_palette(n_distinct(won_opptys_data$hana_product),2),
+          x = ~timespan,
+          y = ~opptys,
+          type="bar")%>%
+    layout(barmode = "stack",
+           bargap=0.1,
+           legend = list(orientation = 'h'))
+}
+)
+```
+
+
+Row 
+-------------------------------------
+
+### Local Fill Funnel
+
+```{r}
+
+ renderPlotly({
+   funnel_data<-funnel_data()
+
+  plot_ly(funnel_data,
+          marker = list(color = "#002D36"),
+          x = ~opptys,
+          y = ~pipeline_stage,
+          type="funnel")
+    
+ }
+ )
+
+```
+
+### Conversion Baseline
+
+```{r}
+
+renderPlotly({
+   conversion_data<-conversion_data()
+  plot_ly(conversion_data,
+          marker = list(color = "#002D36"),
+          orientation='h',
+          y = ~pipeline_stage,
+          x = ~conversion,
+          bargroupgap=0.1,
+          bargap = 0.15)%>%
+    highlight('plotly_click',color='red') %>% 
+    layout(xaxis = list(tickformat = "%"))
+})
+  
+```
+
+### Time in Funnel Stage
+
+```{r}
+
+ renderPlotly({
+   time_in_stage_data<-time_in_stage_data()
+
+
+time_in_stage_data %>% 
+plot_ly(y = ~time_in_stage, 
+        color = ~pipeline_stage, 
+        colors=hana_color_palette(n_distinct(historical_deal_stage$pipeline_stage)),
+        type = "box") %>% 
+  layout(showlegend = FALSE)
+
+ }
+ )
+
+```
+
+
+Fill Detail {data-orientation=rows}
+===================================== 
+
+Inputs {.sidebar}
+-----------------------------------------------------------------------
+```{r}
+
+
+dateRangeInput('detail_date',
+      label = 'Choose the time range',
+      min=RiHana::get_relevant_date()$yoy_date,
+      max=RiHana::get_relevant_date()$yesterdays_date,
+      start = RiHana::get_relevant_date()$ytd_date, 
+      end = RiHana::get_relevant_date()$yesterdays_date,
+      weekstart = 1
+    )
+
+helpText("Note: this will apply a filter for deals that have a closed status.  It will not affect current open deals.")
+
+
+
+# selectInput(
+# "detail_pipeline",
+# label = "Pipeline Stage",
+# choices = c("All" ="*",
+#             "Pre-funnel"="Pre-funnel",
+#             "Working to Contact"="Working to Contact",
+#             "Deal Qualifying"="Deal Qualifying",
+#             "Touring"="Touring",
+#             "Negotiation/Proposal"="Negotiation/Proposal",
+#             "Contract Sent"="Contract Sent",
+#             "Closed Lost"="Closed Lost",
+#             "Closed Won"="Closed Won"),
+# selected = c("All"),
+# multiple = TRUE
+# )
+
+selectizeInput(
+        'detail_pipeline', 'Choose a Stage', choices = unique(pipeline_deals$pipeline_stage),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+)
+
+
+selectizeInput(
+        'detail_region', 'Choose a Region', choices = unique(na.omit(pipeline_deals$hana_region)),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+)
+
+selectizeInput(
+        'detail_location', 'Choose a Location', choices = unique(na.omit(pipeline_deals$hana_unit)),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+)
+
+selectInput(
+"detail_product",
+label = "Product",
+choices=c("All"="*",
+          "Team"="Team",
+          "Share"="Share",
+          "Meet"="Meet"),
+selected="All",
+multiple = TRUE
+)
+
+selectInput(
+"detail_sales",
+label = "Sales Channel",
+choices=c("All"="*",
+          "Local"="Local",
+          "Broker"="Broker",
+          "Enterprise"="Enterprise"),
+selected="All",
+multiple = TRUE
+)
+
+selectizeInput(
+        'detail_acquisition', 'Choose Acquisition Channel(s)', choices = unique(pipeline_deals$acquisition_channel),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        ),
+        multiple=TRUE
+)
+
+radioButtons("detail_confidential_client",label="Hide confidential client names?",
+             choices=c("No"="no",
+                       "Yes"="yes"),
+             selected="no")
+helpText("Note: The confidential client flag has not been migrated to Simplify.  This functionality will be enabled again once supported in Simplify.")
+```
+
+To download this data in the Landlord Report format, click:
+
+```{r}
+downloadButton('report', label='Landlord Report')
+
+downloadHandler(filename = function() { 
+    return('report.html')
+
+ }, content = function(file) {
+        # Copy the report file to a temporary directory before processing it, in
+        # case we don't have write permissions to the current working dir (which
+        # can happen when deployed).
+        tempDirectory<-tempdir()
+        tempReport <- file.path(tempDirectory, "Landlord_Report.Rmd")
+        tempHeader <- file.path(tempDirectory,"hana_logo_small.png")
+        file.copy("Landlord_Report.Rmd", tempReport, overwrite = TRUE)
+        file.copy("inc/hana_logo_small.png", tempHeader, overwrite = TRUE)
+
+        # Set up parameters to pass to Rmd document
+       # params <- list(deal_file = pipeline_detail_data())
+
+        # Knit the document, passing in the `params` list, and eval it in a
+        # child of the global environment (this isolates the code in the document
+        # from the code in this app).
+        rmarkdown::render(tempReport, output_file = file,
+          params = params
+#          envir = new.env(parent = globalenv())
+        )
+}
+    )
+
+
+```
+
+
+Row 
+-------------------------------------
+
+```{r ny summary, echo=FALSE, message=FALSE, warning=FALSE, results='asis', out.width = "80%",fig.asp = .30}
+
+DT::renderDataTable(server = FALSE,{
+  datatable(cbind(' ' = '&oplus;', pipeline_detail_data()), escape = FALSE, extensions = c('Scroller','Buttons', 'ColReorder'), 
+            fillContainer = TRUE,
+          options = list(scrollY = 800, 
+                         scroller = TRUE, 
+                         colReorder=TRUE,
+                         dom = 'tB',
+                         buttons = c('csv'),
+                         columnDefs = list(list(visible = FALSE, searchable=FALSE, targets = c(13,14,15,16)),
+      list(orderable = FALSE, className = 'details-control', targets = 1))),
+            callback = JS("
+  table.column(1).nodes().to$().css({cursor: 'pointer'});
+  var format = function(d) {
+    return '<div style=\"background-color:#eee; padding: .5em;overflow-wrap: break-word;\"> Status Last Week: ' +
+    d[14] +
+    '<br/>Status This Week: ' +
+    d[13] +
+    '<br>Link to CRM: ' +
+    d[15] +
+    '<br/>Notes: ' +
+            d[16]  + '</div>';
+  };
+  table.on('click', 'td.details-control', function() {
+    var td = $(this), row = table.row(td.closest('tr'));
+    if (row.child.isShown()) {
+      row.child.hide();
+      td.html('&oplus;');
+    } else {
+      row.child(format(row.data())).show();
+      td.html('&CircleMinus;');
+    }
+  });")
+  )
+}
+)
+
+
+```
+
+
